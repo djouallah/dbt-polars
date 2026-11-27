@@ -5,6 +5,7 @@
 ### Fixes
 
 - An incremental merge into a Delta table no longer collects the model result first, and when its keys are all new, Polars writes the rows as new files, streaming, with the statistics Polars' Delta sink writes, and delta-rs only commits them, pinned to the version the merge checked, instead of running delta-rs' merge, which held the whole table in memory (#68).
+- Before that check holds the table's keys in memory, a merge whose source values of one key column are none of the table's (a model keyed on its source file, say) is known to have new keys from a streaming scan of that column alone.
 
 ## v0.6.0
 

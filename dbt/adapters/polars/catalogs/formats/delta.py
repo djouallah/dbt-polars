@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow.parquet as pq
+from dbt.adapters.events.logging import AdapterLogger
 from dbt_common.exceptions import DbtRuntimeError
 from deltalake import CommitProperties, DeltaTable
 from deltalake.exceptions import CommitFailedError
@@ -21,6 +22,12 @@ from pyarrow.fs import PyFileSystem
 import polars as pl
 from dbt.adapters.polars.catalogs.baseCatalog import get_write_options
 from dbt.adapters.polars.utils import first_day_from
+
+logger = AdapterLogger("polars")
+
+# The most distinct source values of one key column the disjoint-key probe looks up
+# in the target (_append_if_all_new).
+DISJOINT_PROBE_VALUES = 10_000
 
 # The size of a file an append writes, as Polars estimates the rows in memory.
 APPEND_FILE_BYTES = 512 * 1024 * 1024
@@ -443,8 +450,13 @@ class DeltaFormat:
             pl.len().alias("rows"),
             *(pl.col(k).min().alias(f"min_{i}") for i, k in enumerate(ranged)),
             *(pl.col(k).max().alias(f"max_{i}") for i, k in enumerate(ranged)),
+            *(
+                pl.col(k).approx_n_unique().alias(f"n_{i}")
+                for i, k in enumerate(keys)
+            ),
         ).collect(engine="streaming")
-        if extremes.item(0, "rows") == 0:
+        rows = extremes.item(0, "rows")
+        if rows == 0:
             return True
         bounds = [
             pl.col(k).is_between(
@@ -457,10 +469,21 @@ class DeltaFormat:
         candidates = target.select(keys)
         if bounds:
             candidates = candidates.filter(pl.all_horizontal(bounds))
-        if candidates.limit(1).collect(engine="streaming").height:
+        if not candidates.limit(1).collect(engine="streaming").height:
+            path_taken = "no target row in the key range"
+        elif disjoint := DeltaFormat._disjoint_key(
+            source, candidates, keys, extremes
+        ):
+            path_taken = f"no source {disjoint} in the target"
+        else:
+            # The semi-join holds the target's keys in the range in memory: the last
+            # resort, when every key column has values on both sides.
             matched = source.select(keys).join(candidates, on=keys, how="semi")
             if matched.limit(1).collect(engine="streaming").height:
+                logger.info(f"merge into {path}: {rows} rows, a key matches: merge")
                 return False
+            path_taken = "no key matches (semi-join)"
+        logger.info(f"merge into {path}: {rows} rows, all new, {path_taken}: append")
 
         prefix = f"dbt-polars-{uuid.uuid4()}"
         fs = PyFileSystem(DeltaStorageHandler(dt.table_uri, options=storage_options))
@@ -514,6 +537,34 @@ class DeltaFormat:
                 ) from e
             raise
         return True
+
+    @staticmethod
+    def _disjoint_key(
+        source: pl.LazyFrame,
+        candidates: pl.LazyFrame,
+        keys: list[str],
+        extremes: pl.DataFrame,
+    ) -> str | None:
+        """A key column none of whose source values is in the target, which proves that
+        no key matches: the column with the fewest distinct source values, if it has at
+        most DISJOINT_PROBE_VALUES. Its values are looked up in a streaming scan of
+        that one target column, which holds no target rows, unlike the semi-join on
+        every key. Its name, or None if it overlaps or every column has too many
+        values."""
+        counts = {k: extremes.item(0, f"n_{i}") for i, k in enumerate(keys)}
+        key = min(keys, key=lambda k: counts[k])
+        if counts[key] > DISJOINT_PROBE_VALUES:
+            return None
+        values = source.select(pl.col(key).unique()).collect(engine="streaming")
+        if values.height > DISJOINT_PROBE_VALUES:
+            return None
+        hit = (
+            candidates.select(key)
+            .filter(pl.col(key).is_in(values.get_column(key).implode()))
+            .limit(1)
+            .collect(engine="streaming")
+        )
+        return None if hit.height else key
 
     @staticmethod
     def merge(

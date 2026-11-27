@@ -100,6 +100,49 @@ def test_a_matching_key_is_merged(table):
     assert last_operation(table) == "MERGE"
 
 
+def two_key_table(tmp_path, rows):
+    path = str(tmp_path / "t2")
+    schema = {"file": pl.String, "id": pl.Int64}
+    pl.DataFrame(rows, schema=schema, orient="row").write_delta(path)
+    return path
+
+
+def test_a_disjoint_key_column_appends(tmp_path, monkeypatch):
+    """Target rows inside the source's key range, but no source `file` in the target:
+    the probe on that one column proves the keys new, and the semi-join never runs."""
+    path = two_key_table(tmp_path, [("b", 1), ("b", 2)])
+    semi_joins = []
+    join = pl.LazyFrame.join
+    monkeypatch.setattr(
+        pl.LazyFrame,
+        "join",
+        lambda self, *a, **k: semi_joins.append(k.get("how")) or join(self, *a, **k),
+    )
+
+    source = pl.LazyFrame({"file": ["a", "c", "a"], "id": [1, 2, 3]})
+    merge(path, source, ("file", "id"))
+
+    assert semi_joins == []
+    assert last_operation(path) == "WRITE"
+    assert pl.read_delta(path).height == 5
+
+
+def test_overlapping_columns_without_a_matching_key_append(tmp_path):
+    """Every key column has values on both sides but no key matches: the semi-join
+    finds none, and the rows are appended."""
+    path = two_key_table(tmp_path, [("a", 1), ("b", 2)])
+
+    merge(path, pl.LazyFrame({"file": ["a", "b"], "id": [2, 1]}), ("file", "id"))
+
+    assert last_operation(path) == "WRITE"
+    assert pl.read_delta(path).sort("file", "id").rows() == [
+        ("a", 1),
+        ("a", 2),
+        ("b", 1),
+        ("b", 2),
+    ]
+
+
 def test_empty_source_commits_nothing(table):
     version = DeltaTable(table).version()
 
