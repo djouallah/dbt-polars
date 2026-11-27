@@ -1090,8 +1090,8 @@ class PolarsAdapter(BaseAdapter):
                 if isinstance(unique_key, str)
                 else list(dict.fromkeys(unique_key))
             )
-            # Not collected here: a Delta merge streams a LazyFrame into delta-rs, and the
-            # catalogs that need the whole frame collect it themselves.
+            # Not collected here: a Delta merge streams a LazyFrame into delta-rs,
+            # and the catalogs that need the whole frame collect it themselves.
             except_cols = self._resolve_merge_except_cols(
                 new_data, merge_update_columns, merge_exclude_columns
             )
