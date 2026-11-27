@@ -1,4 +1,7 @@
 import itertools
+import os
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +11,45 @@ from deltalake import DeltaTable
 import polars as pl
 from dbt.adapters.polars.catalogs.baseCatalog import get_write_options
 from dbt.adapters.polars.utils import first_day_from
+
+
+# delta-rs' merge spills only when max_spill_size is set; without it its memory pool is
+# unbounded. The defaults: a share of the memory limit in memory, a share of the temp
+# disk's free space on disk (DataFusion's own on-disk cap is a flat 100 GB).
+MERGE_SPILL_FRACTION = 0.6
+MERGE_TEMP_DIR_FRACTION = 0.8
+
+
+def _memory_limit_bytes() -> int | None:
+    """The cgroup memory limit, else physical RAM; None when neither can be read."""
+    for limit_file in (
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ):
+        try:
+            text = Path(limit_file).read_text().strip()
+        except OSError:
+            continue
+        if text.isdigit() and int(text) < 1 << 60:
+            return int(text)
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _merge_spill_defaults() -> dict:
+    defaults = {}
+    memory = _memory_limit_bytes()
+    if memory:
+        defaults["max_spill_size"] = int(memory * MERGE_SPILL_FRACTION)
+    try:
+        free = shutil.disk_usage(tempfile.gettempdir()).free
+    except OSError:
+        free = 0
+    if free:
+        defaults["max_temp_directory_size"] = int(free * MERGE_TEMP_DIR_FRACTION)
+    return defaults
 
 
 class DeltaFormat:
@@ -175,6 +217,7 @@ class DeltaFormat:
                 "merge_schema",
             },
         )
+        kwargs = {**_merge_spill_defaults(), **kwargs}
         # streamed_exec=False collects the source, so delta-rs can prune the target's
         # files on the source's key statistics; streamed, it reads the whole target.
         streamed = kwargs.pop("streamed_exec", True)
