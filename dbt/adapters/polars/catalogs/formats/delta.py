@@ -173,9 +173,13 @@ class DeltaFormat:
                 "source_alias",
                 "target_alias",
                 "merge_schema",
-                "streamed_exec",
             },
         )
+        # streamed_exec=False collects the source, so delta-rs can prune the target's
+        # files on the source's key statistics; streamed, it reads the whole target.
+        streamed = kwargs.pop("streamed_exec", True)
+        if not streamed and isinstance(df, pl.LazyFrame):
+            df = df.collect()
         (
             dt.merge(
                 DeltaFormat._merge_source(df),
@@ -183,7 +187,7 @@ class DeltaFormat:
                 source_alias="DBT_INTERNAL_SOURCE",
                 target_alias="DBT_INTERNAL_DEST",
                 merge_schema=allow_schema_evolution,
-                streamed_exec=True,
+                streamed_exec=streamed,
                 **kwargs,
             )
             .when_matched_update_all(except_cols=except_cols)
