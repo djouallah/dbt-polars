@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pyarrow as pa
 from dbt.adapters.events.logging import AdapterLogger
-from deltalake import DeltaTable
+from dbt_common.exceptions import DbtRuntimeError
+from deltalake import CommitProperties, DeltaTable, write_deltalake
+from deltalake.exceptions import CommitFailedError
 
 import polars as pl
 from dbt.adapters.polars.catalogs.baseCatalog import get_write_options
@@ -214,22 +216,106 @@ class DeltaFormat:
     @staticmethod
     def _merge_source(
         data: pl.DataFrame | pl.LazyFrame,
+        compat_level: pl.CompatLevel | None = None,
     ) -> pa.Table | pa.RecordBatchReader:
         """A DataFrame as an Arrow table; a LazyFrame as an Arrow stream of its batches,
         so the model result is never held whole next to delta-rs' merge."""
         if isinstance(data, pl.DataFrame):
-            return data.to_arrow()
+            return data.to_arrow(compat_level=compat_level)
         batches = (
             batch
             for frame in data.collect_batches(lazy=True)
-            for batch in frame.to_arrow().to_batches()
+            for batch in frame.to_arrow(compat_level=compat_level).to_batches()
         )
         first = next(batches, None)
         if first is None:
-            return pl.DataFrame(schema=data.collect_schema()).to_arrow()
+            empty = pl.DataFrame(schema=data.collect_schema())
+            return empty.to_arrow(compat_level=compat_level)
         return pa.RecordBatchReader.from_batches(
             first.schema, itertools.chain([first], batches)
         )
+
+    @staticmethod
+    def _append_if_unmatched(
+        dt: DeltaTable,
+        path: str,
+        data: pl.DataFrame | pl.LazyFrame,
+        keys: list[str],
+        allow_schema_evolution: bool,
+        storage_options: dict[str, str] | None,
+    ) -> bool:
+        """When no key of the source is in the target, the merge only inserts: append
+        the source instead of running delta-rs' join, which holds the target's side of
+        the join in memory. The target is probed at the version `dt` is loaded at, and
+        the append is pinned to it (max_commit_retries=0), so a commit since then fails
+        the merge instead of letting a duplicate through. True when handled."""
+        version = dt.version()
+        target = pl.scan_delta(path, version=version, storage_options=storage_options)
+        target_schema = target.collect_schema()
+        if any(k not in target_schema for k in keys):
+            return False
+        source = data.lazy()
+        try:
+            source_keys = (
+                source.select(keys)
+                .unique()
+                .cast({k: target_schema[k] for k in keys})
+                .collect(engine="streaming")
+            )
+        except pl.exceptions.PolarsError:
+            return False
+        if source_keys.height == 0:
+            # Nothing to insert or update: no commit, unless the schema may evolve.
+            return not allow_schema_evolution
+
+        # A target row can only match a source key inside the source's key range:
+        # the range lets the scan skip files on their statistics.
+        bounds = []
+        for k in keys:
+            column = source_keys.get_column(k)
+            if column.dtype.is_integer() or column.dtype.is_temporal() or (
+                column.dtype == pl.String
+            ):
+                low, high = column.min(), column.max()
+                if low is not None:
+                    bounds.append(pl.col(k).is_between(low, high))
+        candidates = target.select(keys)
+        if bounds:
+            candidates = candidates.filter(pl.all_horizontal(bounds))
+        matched = (
+            candidates.join(source_keys.lazy(), on=keys, how="semi")
+            .limit(1)
+            .collect(engine="streaming")
+        )
+        if matched.height:
+            return False
+
+        columns = source.collect_schema()
+        casts = {
+            c: target_schema[c]
+            for c in columns.names()
+            if c in target_schema and columns[c] != target_schema[c]
+        }
+        if casts:
+            source = source.cast(casts)  # type: ignore[arg-type]
+        logger.info(
+            f"delta merge: no source key in the target at version {version}; "
+            "appending the source, pinned to that version"
+        )
+        try:
+            write_deltalake(
+                dt,
+                DeltaFormat._merge_source(source, pl.CompatLevel.oldest()),
+                mode="append",
+                schema_mode="merge" if allow_schema_evolution else None,
+                commit_properties=CommitProperties(max_commit_retries=0),
+            )
+        except CommitFailedError as e:
+            raise DbtRuntimeError(
+                f"merge into {path}: the table changed since version {version} (a "
+                "concurrent write committed); merge refused, run it again"
+            ) from e
+        return True
 
     @staticmethod
     def merge(
@@ -248,6 +334,10 @@ class DeltaFormat:
         if incremental_predicates:
             predicate += " AND " + " AND ".join(incremental_predicates)
         dt = DeltaTable(str(path), storage_options=storage_options)
+        if not incremental_predicates and DeltaFormat._append_if_unmatched(
+            dt, str(path), df, keys, allow_schema_evolution, storage_options
+        ):
+            return
         kwargs = get_write_options(
             DeltaTable.merge,
             model_config or {},

@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- An incremental merge into a Delta table streams the model result into delta-rs instead of collecting it first (#68).
+- An incremental merge into a Delta table whose source keys are not in the table appends the source, pinned to the version it probed, instead of running delta-rs' merge; other merges stream the source to delta-rs with spill caps (#68).
 
 ## v0.6.0
 
