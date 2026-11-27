@@ -156,6 +156,7 @@ class DeltaFormat:
         incremental_predicates: list[str] | None,
         allow_schema_evolution: bool,
         storage_options: dict[str, str] | None = None,
+        model_config: dict | None = None,
     ) -> None:
         predicate = " AND ".join(
             f"DBT_INTERNAL_SOURCE.{k} = DBT_INTERNAL_DEST.{k}" for k in keys
@@ -163,6 +164,18 @@ class DeltaFormat:
         if incremental_predicates:
             predicate += " AND " + " AND ".join(incremental_predicates)
         dt = DeltaTable(str(path), storage_options=storage_options)
+        kwargs = get_write_options(
+            DeltaTable.merge,
+            model_config or {},
+            ignore={
+                "source",
+                "predicate",
+                "source_alias",
+                "target_alias",
+                "merge_schema",
+                "streamed_exec",
+            },
+        )
         (
             dt.merge(
                 DeltaFormat._merge_source(df),
@@ -171,6 +184,7 @@ class DeltaFormat:
                 target_alias="DBT_INTERNAL_DEST",
                 merge_schema=allow_schema_evolution,
                 streamed_exec=True,
+                **kwargs,
             )
             .when_matched_update_all(except_cols=except_cols)
             .when_not_matched_insert_all()

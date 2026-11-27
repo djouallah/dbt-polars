@@ -254,6 +254,7 @@ class StorageCatalog(BaseCatalog):
                     incremental_predicates,
                     allow_schema_evolution,
                     storage_options=opts,
+                    model_config=model_config,
                 )
             else:
                 FileFormat.merge(

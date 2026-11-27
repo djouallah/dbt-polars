@@ -91,6 +91,12 @@ Options passed to the function that writes the table. For Delta tables, these ar
 {{ config(file_format="parquet", write_options={"compression": "zstd"}) }}
 ```
 
+For an incremental merge into a Delta table, write_options also reach delta-rs' [merge](https://delta-io.github.io/delta-rs/api/delta_table/#deltalake.DeltaTable.merge), such as `max_spill_size`, the bytes the merge holds in memory before it spills to disk:
+
+```sql
+{{ config(materialized="incremental", incremental_strategy="merge", unique_key="id", write_options={"max_spill_size": 4294967296}) }}
+```
+
 For Iceberg tables, write_options sets the `batch_size`, see [Writing Iceberg tables in batches](guides/performance.md#writing-iceberg-tables-in-batches).
 
 * Supported by all catalogs.
