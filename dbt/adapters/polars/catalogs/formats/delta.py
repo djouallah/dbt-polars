@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pyarrow as pa
+from dbt.adapters.events.logging import AdapterLogger
 from deltalake import DeltaTable
 
 import polars as pl
@@ -13,34 +14,75 @@ from dbt.adapters.polars.catalogs.baseCatalog import get_write_options
 from dbt.adapters.polars.utils import first_day_from
 
 
+logger = AdapterLogger("polars")
+
 # delta-rs' merge spills only when max_spill_size is set; without it its memory pool is
-# unbounded. The defaults: a share of the memory limit in memory, a share of the temp
-# disk's free space on disk (DataFusion's own on-disk cap is a flat 100 GB).
+# unbounded. The defaults: a share of the memory this process may use when the merge
+# starts, and a share of the temp disk's free space (DataFusion's own on-disk cap is a
+# flat 100 GB).
 MERGE_SPILL_FRACTION = 0.6
 MERGE_TEMP_DIR_FRACTION = 0.8
 
 
-def _memory_limit_bytes() -> int | None:
-    """The cgroup memory limit, else physical RAM; None when neither can be read."""
-    for limit_file in (
-        "/sys/fs/cgroup/memory.max",
-        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-    ):
-        try:
-            text = Path(limit_file).read_text().strip()
-        except OSError:
-            continue
-        if text.isdigit() and int(text) < 1 << 60:
-            return int(text)
+def _read_int(path: str, key: str | None = None, scale: int = 1) -> int | None:
+    """An integer from a /proc or /sys file: the whole file, or the line `key:`."""
     try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (AttributeError, OSError, ValueError):
+        text = Path(path).read_text()
+    except OSError:
         return None
+    if key is not None:
+        line = next((ln for ln in text.splitlines() if ln.startswith(key + ":")), "")
+        text = line.split(":", 1)[-1].split()[0] if line else ""
+    text = text.strip()
+    return int(text) * scale if text.isdigit() else None
+
+
+def _cgroup_memory_limit() -> int | None:
+    """The tightest memory.max from this process's cgroup up to the root (v2), or the
+    v1 limit; None when unlimited or not on Linux."""
+    try:
+        line = next(
+            ln
+            for ln in Path("/proc/self/cgroup").read_text().splitlines()
+            if ln.startswith("0::")
+        )
+    except (OSError, StopIteration):
+        line = None
+    limits = []
+    if line is not None:
+        base = Path("/sys/fs/cgroup")
+        current = base / line[3:].lstrip("/")
+        while True:
+            limit = _read_int(str(current / "memory.max"))
+            if limit:
+                limits.append(limit)
+            if current == base or base not in current.parents:
+                break
+            current = current.parent
+    v1 = _read_int("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if v1 and v1 < 1 << 62:
+        limits.append(v1)
+    return min(limits) if limits else None
+
+
+def _memory_limit() -> int | None:
+    """The memory this process may use now: the tightest of physical RAM, the cgroup
+    limit, and the RAM available plus this process's own resident memory (ours to
+    reuse). Sampled when the merge starts, after earlier models took their share."""
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        total = None
+    available = _read_int("/proc/meminfo", "MemAvailable", 1024)
+    if available is not None:
+        available += _read_int("/proc/self/status", "VmRSS", 1024) or 0
+    limits = [v for v in (total, _cgroup_memory_limit(), available) if v]
+    return min(limits) if limits else None
 
 
 def _merge_spill_defaults() -> dict:
     defaults = {}
-    memory = _memory_limit_bytes()
+    memory = _memory_limit()
     if memory:
         defaults["max_spill_size"] = int(memory * MERGE_SPILL_FRACTION)
     try:
@@ -218,11 +260,17 @@ class DeltaFormat:
             },
         )
         kwargs = {**_merge_spill_defaults(), **kwargs}
-        # streamed_exec=False collects the source, so delta-rs can prune the target's
-        # files on the source's key statistics; streamed, it reads the whole target.
-        streamed = kwargs.pop("streamed_exec", True)
-        if not streamed and isinstance(df, pl.LazyFrame):
-            df = df.collect()
+        # The source goes to delta-rs as an Arrow stream. With streamed_exec off (the
+        # default) delta-rs collects it and can prune the target on its statistics.
+        streamed = kwargs.pop("streamed_exec", False)
+        logger.info(
+            f"delta merge: streamed_exec={streamed}, "
+            + ", ".join(
+                f"{k}={kwargs[k] / 2**30:.1f} GiB"
+                for k in ("max_spill_size", "max_temp_directory_size")
+                if kwargs.get(k)
+            )
+        )
         (
             dt.merge(
                 DeltaFormat._merge_source(df),
