@@ -149,6 +149,39 @@ class IncrementalTests(CatalogTestBase):
             pl.DataFrame({"id": [1, 2, 3], "value": ["a", "B", "c"]}),
         )
 
+    def test_merge_lazy(self, catalog, schema_relation):
+        relation = self.table(schema_relation, "merged_lazy")
+        catalog.write_relation(
+            relation, pl.DataFrame({"id": [1, 2], "value": ["a", "b"]}), []
+        )
+        source = pl.concat(
+            [
+                pl.LazyFrame({"id": [2], "value": ["B"]}),
+                pl.LazyFrame({"id": [3, 4], "value": ["c", "d"]}),
+            ]
+        )
+
+        catalog.merge_relation(relation, source, keys=["id"], except_cols=[])
+
+        assert_frame_equal(
+            self.read_sorted(catalog, relation),
+            pl.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "B", "c", "d"]}),
+        )
+
+    def test_merge_lazy_empty(self, catalog, schema_relation):
+        relation = self.table(schema_relation, "merged_lazy_empty")
+        catalog.write_relation(
+            relation, pl.DataFrame({"id": [1, 2], "value": ["a", "b"]}), []
+        )
+        source = pl.LazyFrame({"id": [1], "value": ["A"]}).filter(pl.lit(False))
+
+        catalog.merge_relation(relation, source, keys=["id"])
+
+        assert_frame_equal(
+            self.read_sorted(catalog, relation),
+            pl.DataFrame({"id": [1, 2], "value": ["a", "b"]}),
+        )
+
     def test_delete_matched(self, catalog, schema_relation):
         relation = self.table(schema_relation, "deleted")
         catalog.write_relation(relation, pl.DataFrame({"id": [1, 2, 3]}), [])

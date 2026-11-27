@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes
+
+- An incremental merge into a Delta table streams the model result into delta-rs instead of collecting it first (#68).
+
 ## v0.6.0
 
 ### Implements

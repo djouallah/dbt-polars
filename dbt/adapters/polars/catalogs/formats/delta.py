@@ -1,6 +1,8 @@
+import itertools
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pyarrow as pa
 from deltalake import DeltaTable
 
 import polars as pl
@@ -126,9 +128,29 @@ class DeltaFormat:
         )
 
     @staticmethod
+    def _merge_source(
+        data: pl.DataFrame | pl.LazyFrame,
+    ) -> pa.Table | pa.RecordBatchReader:
+        """A DataFrame as an Arrow table; a LazyFrame as an Arrow stream of its batches,
+        so the model result is never held whole next to delta-rs' merge."""
+        if isinstance(data, pl.DataFrame):
+            return data.to_arrow()
+        batches = (
+            batch
+            for frame in data.collect_batches(lazy=True)
+            for batch in frame.to_arrow().to_batches()
+        )
+        first = next(batches, None)
+        if first is None:
+            return pl.DataFrame(schema=data.collect_schema()).to_arrow()
+        return pa.RecordBatchReader.from_batches(
+            first.schema, itertools.chain([first], batches)
+        )
+
+    @staticmethod
     def merge(
         path: str | Path,
-        df: pl.DataFrame,
+        df: pl.DataFrame | pl.LazyFrame,
         keys: list[str],
         except_cols: list[str] | None,
         incremental_predicates: list[str] | None,
@@ -143,11 +165,12 @@ class DeltaFormat:
         dt = DeltaTable(str(path), storage_options=storage_options)
         (
             dt.merge(
-                df.to_arrow(),
+                DeltaFormat._merge_source(df),
                 predicate,
                 source_alias="DBT_INTERNAL_SOURCE",
                 target_alias="DBT_INTERNAL_DEST",
                 merge_schema=allow_schema_evolution,
+                streamed_exec=True,
             )
             .when_matched_update_all(except_cols=except_cols)
             .when_not_matched_insert_all()

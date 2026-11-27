@@ -185,7 +185,7 @@ class TableFormatCatalog(BaseCatalog):
     def merge_relation(
         self,
         relation: PolarsRelation,
-        df: pl.DataFrame,
+        df: pl.DataFrame | pl.LazyFrame,
         keys: list[str],
         except_cols: list[str] | None = None,
         incremental_predicates: list[str] | None = None,

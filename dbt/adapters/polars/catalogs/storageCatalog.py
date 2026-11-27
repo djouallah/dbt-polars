@@ -230,7 +230,7 @@ class StorageCatalog(BaseCatalog):
     def merge_relation(
         self,
         relation: PolarsRelation,
-        df: pl.DataFrame,
+        df: pl.DataFrame | pl.LazyFrame,
         keys: list[str],
         except_cols: list[str] | None = None,
         incremental_predicates: list[str] | None = None,
@@ -259,7 +259,7 @@ class StorageCatalog(BaseCatalog):
                 FileFormat.merge(
                     uri,
                     file_format_of(relation),
-                    df,
+                    df.collect() if isinstance(df, pl.LazyFrame) else df,
                     keys,
                     except_cols,
                     relation.read_options,

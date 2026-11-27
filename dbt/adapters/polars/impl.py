@@ -984,7 +984,7 @@ class PolarsAdapter(BaseAdapter):
 
     def _resolve_merge_except_cols(
         self,
-        new_data: pl.DataFrame,
+        new_data: pl.DataFrame | pl.LazyFrame,
         merge_update_columns: str | list[str] | None,
         merge_exclude_columns: str | list[str] | None,
     ) -> list[str] | None:
@@ -1005,7 +1005,7 @@ class PolarsAdapter(BaseAdapter):
         if not merge_update_columns and not merge_exclude_columns:
             return None
 
-        dest_cols = new_data.columns
+        dest_cols = new_data.collect_schema().names()
 
         if merge_exclude_columns:
             exclude = (
@@ -1090,15 +1090,14 @@ class PolarsAdapter(BaseAdapter):
                 if isinstance(unique_key, str)
                 else list(dict.fromkeys(unique_key))
             )
-            collected_data = (
-                new_data.collect() if isinstance(new_data, pl.LazyFrame) else new_data
-            )
+            # Not collected here: a Delta merge streams a LazyFrame into delta-rs, and the
+            # catalogs that need the whole frame collect it themselves.
             except_cols = self._resolve_merge_except_cols(
-                collected_data, merge_update_columns, merge_exclude_columns
+                new_data, merge_update_columns, merge_exclude_columns
             )
             catalog.merge_relation(
                 relation,
-                collected_data,
+                new_data,
                 keys,
                 except_cols=except_cols,
                 incremental_predicates=incremental_predicates or None,
