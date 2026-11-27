@@ -15,7 +15,6 @@ import polars as pl
 from dbt.adapters.polars.catalogs.baseCatalog import get_write_options
 from dbt.adapters.polars.utils import first_day_from
 
-
 logger = AdapterLogger("polars")
 
 # delta-rs' merge spills only when max_spill_size is set; without it its memory pool is
@@ -273,12 +272,14 @@ class DeltaFormat:
         bounds = []
         for k in keys:
             column = source_keys.get_column(k)
-            if column.dtype.is_integer() or column.dtype.is_temporal() or (
-                column.dtype == pl.String
+            if (
+                column.dtype.is_integer()
+                or column.dtype.is_temporal()
+                or (column.dtype == pl.String)
             ):
                 low, high = column.min(), column.max()
                 if low is not None:
-                    bounds.append(pl.col(k).is_between(low, high))
+                    bounds.append(pl.col(k).is_between(pl.lit(low), pl.lit(high)))
         candidates = target.select(keys)
         if bounds:
             candidates = candidates.filter(pl.all_horizontal(bounds))

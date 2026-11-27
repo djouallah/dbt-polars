@@ -30,7 +30,7 @@ def test_unmatched_source_is_appended(table):
     assert_frame_equal(
         read(table), pl.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
     )
-    assert DeltaTable(table).history(1)[0]["operation"] == "WRITE"
+    assert list(DeltaTable(table).history(1))[0]["operation"] == "WRITE"
 
 
 def test_matched_source_is_merged(table):
@@ -39,7 +39,7 @@ def test_matched_source_is_merged(table):
     assert_frame_equal(
         read(table), pl.DataFrame({"id": [1, 2, 3], "value": ["a", "B", "c"]})
     )
-    assert DeltaTable(table).history(1)[0]["operation"] == "MERGE"
+    assert list(DeltaTable(table).history(1))[0]["operation"] == "MERGE"
 
 
 def test_empty_source_commits_nothing(table):
