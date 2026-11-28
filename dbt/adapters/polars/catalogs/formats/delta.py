@@ -450,10 +450,7 @@ class DeltaFormat:
             pl.len().alias("rows"),
             *(pl.col(k).min().alias(f"min_{i}") for i, k in enumerate(ranged)),
             *(pl.col(k).max().alias(f"max_{i}") for i, k in enumerate(ranged)),
-            *(
-                pl.col(k).approx_n_unique().alias(f"n_{i}")
-                for i, k in enumerate(keys)
-            ),
+            *(pl.col(k).approx_n_unique().alias(f"n_{i}") for i, k in enumerate(keys)),
         ).collect(engine="streaming")
         rows = extremes.item(0, "rows")
         if rows == 0:
@@ -471,9 +468,7 @@ class DeltaFormat:
             candidates = candidates.filter(pl.all_horizontal(bounds))
         if not candidates.limit(1).collect(engine="streaming").height:
             path_taken = "no target row in the key range"
-        elif disjoint := DeltaFormat._disjoint_key(
-            source, candidates, keys, extremes
-        ):
+        elif disjoint := DeltaFormat._disjoint_key(source, candidates, keys, extremes):
             path_taken = f"no source {disjoint} in the target"
         else:
             # The semi-join holds the target's keys in the range in memory: the last
