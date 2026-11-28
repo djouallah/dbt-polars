@@ -109,7 +109,8 @@ def two_key_table(tmp_path, rows):
 
 def test_a_disjoint_key_column_appends(tmp_path, monkeypatch):
     """Target rows inside the source's key range, but no source `file` in the target:
-    the probe on that one column proves the keys new, and the semi-join never runs."""
+    the probe on that one column proves the keys new, and the semi-join never runs,
+    though `id`, with fewer distinct values, overlaps."""
     path = two_key_table(tmp_path, [("b", 1), ("b", 2)])
     semi_joins = []
     join = pl.LazyFrame.join
@@ -119,7 +120,7 @@ def test_a_disjoint_key_column_appends(tmp_path, monkeypatch):
         lambda self, *a, **k: semi_joins.append(k.get("how")) or join(self, *a, **k),
     )
 
-    source = pl.LazyFrame({"file": ["a", "c", "a"], "id": [1, 2, 3]})
+    source = pl.LazyFrame({"file": ["a", "c", "d"], "id": [1, 1, 2]})
     merge(path, source, ("file", "id"))
 
     assert semi_joins == []

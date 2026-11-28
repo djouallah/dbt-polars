@@ -541,25 +541,36 @@ class DeltaFormat:
         extremes: pl.DataFrame,
     ) -> str | None:
         """A key column none of whose source values is in the target, which proves that
-        no key matches: the column with the fewest distinct source values, if it has at
-        most DISJOINT_PROBE_VALUES. Its values are looked up in a streaming scan of
-        that one target column, which holds no target rows, unlike the semi-join on
-        every key. Its name, or None if it overlaps or every column has too many
-        values."""
+        no key matches. Every key column with at most DISJOINT_PROBE_VALUES distinct
+        source values is a candidate: their values are gathered in one streaming pass,
+        and each is looked up in a streaming scan of that one target column, which
+        holds no target rows, unlike the semi-join on every key. The most distinct
+        first: a column with few values (a flag) is the least likely to be disjoint.
+        Its name, or None if every candidate overlaps or there is none."""
         counts = {k: extremes.item(0, f"n_{i}") for i, k in enumerate(keys)}
-        key = min(keys, key=lambda k: counts[k])
-        if counts[key] > DISJOINT_PROBE_VALUES:
-            return None
-        values = source.select(pl.col(key).unique()).collect(engine="streaming")
-        if values.height > DISJOINT_PROBE_VALUES:
-            return None
-        hit = (
-            candidates.select(key)
-            .filter(pl.col(key).is_in(values.get_column(key).implode()))
-            .limit(1)
-            .collect(engine="streaming")
+        probed = sorted(
+            (k for k in keys if counts[k] <= DISJOINT_PROBE_VALUES),
+            key=lambda k: counts[k],
+            reverse=True,
         )
-        return None if hit.height else key
+        if not probed:
+            return None
+        values = source.select(pl.col(k).unique().implode() for k in probed).collect(
+            engine="streaming"
+        )
+        for key in probed:
+            column = values.get_column(key)[0]
+            if column.len() > DISJOINT_PROBE_VALUES:
+                continue
+            hit = (
+                candidates.select(key)
+                .filter(pl.col(key).is_in(column.implode()))
+                .limit(1)
+                .collect(engine="streaming")
+            )
+            if not hit.height:
+                return key
+        return None
 
     @staticmethod
     def merge(
