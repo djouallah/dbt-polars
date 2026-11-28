@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Implements
+
+- `append_if_unchanged`: an append into a Delta table the model read is committed against the version it read, with no retry, so a concurrent commit fails it instead of appending duplicate rows.
+
 ### Fixes
 
 - An incremental merge into a Delta table no longer collects the model result first, and when its keys are all new, Polars writes the rows as new files, streaming, with the statistics Polars' Delta sink writes, and delta-rs only commits them, pinned to the version the merge checked, instead of running delta-rs' merge, which held the whole table in memory (#68).

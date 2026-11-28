@@ -216,6 +216,7 @@ POLARS_MODEL_CONFIG_KEYS = frozenset(
         "merge_exclude_columns",
         "incremental_predicates",
         "predicates",
+        "append_if_unchanged",
     }
 )
 

@@ -25,6 +25,11 @@ from dbt.adapters.polars.utils import first_day_from
 
 logger = AdapterLogger("polars")
 
+# The version each Delta table was first read at in this run, by URI. An append with
+# `append_if_unchanged` commits pinned to the version its model read
+# (DeltaFormat.append).
+_READ_VERSIONS: dict[str, int] = {}
+
 # The most distinct source values of one key column the disjoint-key probe looks up
 # in the target (_append_if_all_new).
 DISJOINT_PROBE_VALUES = 10_000
@@ -306,7 +311,13 @@ class DeltaFormat:
         model_config: dict,
         adapter_delta_opts: dict,
         storage_options: dict[str, str] | None = None,
+        target: DeltaTable | None = None,
     ) -> None:
+        """`target`, when given, is the table written to instead of `path`: a DeltaTable
+        loaded at a version pins the commit to it, and carries its storage options."""
+        destination: str | DeltaTable = path if target is None else target
+        if target is not None:
+            storage_options = None
         if (
             isinstance(data, pl.LazyFrame)
             and model_config.get("write_mode", "lazy") == "lazy"
@@ -317,7 +328,9 @@ class DeltaFormat:
                 ignore={"mode", "target", "storage_options"},
                 merge={"delta_write_options": adapter_delta_opts},
             )
-            data.sink_delta(path, mode=mode, storage_options=storage_options, **kwargs)  # type: ignore[call-overload]
+            data.sink_delta(  # type: ignore[call-overload]
+                destination, mode=mode, storage_options=storage_options, **kwargs
+            )
         else:
             df = data.collect() if isinstance(data, pl.LazyFrame) else data
             kwargs = get_write_options(
@@ -326,7 +339,9 @@ class DeltaFormat:
                 ignore={"mode", "target", "storage_options"},
                 merge={"delta_write_options": adapter_delta_opts},
             )
-            df.write_delta(path, mode=mode, storage_options=storage_options, **kwargs)  # type: ignore[call-overload]
+            df.write_delta(  # type: ignore[call-overload]
+                destination, mode=mode, storage_options=storage_options, **kwargs
+            )
 
     @staticmethod
     def write(
@@ -356,7 +371,12 @@ class DeltaFormat:
         path: str | Path,
         storage_options: dict[str, str] | None = None,
     ) -> pl.LazyFrame:
-        return pl.scan_delta(str(path), storage_options=storage_options)
+        """The table at its current version, which is recorded: the first version read
+        in the run is the one an `append_if_unchanged` append commits against."""
+        uri = str(path)
+        version = DeltaTable(uri, storage_options=storage_options).version()
+        _READ_VERSIONS.setdefault(uri, version)
+        return pl.scan_delta(uri, version=version, storage_options=storage_options)
 
     @staticmethod
     def append(
@@ -366,15 +386,44 @@ class DeltaFormat:
         model_config: dict,
         storage_options: dict[str, str] | None = None,
     ) -> None:
+        """With `append_if_unchanged`, an append into a table the model read is
+        committed against the version it read, with no retry: if another writer
+        committed since, the append is refused instead of adding rows computed from a
+        stale table, e.g. the same new rows twice. A model that never read the table
+        appends as usual."""
+        uri = str(path)
         adapter_delta_opts = {"schema_mode": "merge"} if allow_schema_evolution else {}
-        DeltaFormat._write(
-            str(path),
-            data,
-            "append",
-            model_config,
-            adapter_delta_opts,
-            storage_options=storage_options,
-        )
+        version = _READ_VERSIONS.pop(uri, None)
+        if not model_config.get("append_if_unchanged") or version is None:
+            DeltaFormat._write(
+                uri,
+                data,
+                "append",
+                model_config,
+                adapter_delta_opts,
+                storage_options=storage_options,
+            )
+            return
+        pinned = DeltaTable(uri, version=version, storage_options=storage_options)
+        try:
+            DeltaFormat._write(
+                uri,
+                data,
+                "append",
+                model_config,
+                {
+                    **adapter_delta_opts,
+                    "commit_properties": CommitProperties(max_commit_retries=0),
+                },
+                storage_options=storage_options,
+                target=pinned,
+            )
+        except CommitFailedError as e:
+            raise DbtRuntimeError(
+                f"append into {uri}: the table changed since version {version}, which "
+                "the model read (a concurrent write committed); append refused, run it "
+                "again"
+            ) from e
 
     @staticmethod
     def replace_window(

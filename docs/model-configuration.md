@@ -33,6 +33,7 @@ The configurations below are specific to dbt-polars, or work differently than in
 * [read_options](#read_options): options for reading the stored files of the model.
 * [merge_update_columns and merge_exclude_columns](#merge_update_columns-and-merge_exclude_columns): the columns a merge updates.
 * [incremental_predicates](#incremental_predicates): extra conditions for merge and delete+insert.
+* [append_if_unchanged](#append_if_unchanged): refuse an append if the table changed since the model read it.
 
 ## catalog
 
@@ -146,3 +147,18 @@ Extra conditions for the merge and delete+insert incremental strategies, to limi
 
 * Supported by Delta tables in all catalogs.
 * Not supported by Iceberg tables, or tables stored as Parquet, CSV or NDJSON.
+
+## append_if_unchanged
+
+For the append incremental strategy: when the model reads its own table (`{{ this }}`, for example to select the rows not loaded yet), the append is committed against the version it read, with no retry. If another writer committed since, the run fails instead of appending rows computed from an outdated table, such as the same new rows twice. Run the model again to append against the new version. A model that does not read its own table appends as usual.
+
+```sql
+{{ config(
+    materialized="incremental",
+    incremental_strategy="append",
+    append_if_unchanged=true,
+) }}
+```
+
+* Supported by Delta tables in the storage catalogs (local, Azure, Fabric, Databricks).
+* Not supported by Iceberg tables.

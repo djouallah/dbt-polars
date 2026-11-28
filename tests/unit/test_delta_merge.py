@@ -9,7 +9,7 @@ from dbt_common.exceptions import DbtRuntimeError
 from deltalake import DeltaTable, write_deltalake
 from polars.testing import assert_frame_equal
 
-from dbt.adapters.polars.catalogs.formats.delta import DeltaFormat
+from dbt.adapters.polars.catalogs.formats.delta import _READ_VERSIONS, DeltaFormat
 
 
 @pytest.fixture
@@ -199,3 +199,50 @@ def test_append_refused_after_a_concurrent_commit(table):
 
     assert pl.read_delta(table)["id"].sort().to_list() == [1, 2, 3]
     assert parquet_files(table) == files
+
+
+@pytest.fixture
+def no_reads():
+    """The versions recorded by DeltaFormat.read, cleared around each test."""
+    _READ_VERSIONS.clear()
+    yield
+    _READ_VERSIONS.clear()
+
+
+SAFE = {"append_if_unchanged": True}
+
+
+def test_append_if_unchanged_appends_on_the_version_read(table, no_reads):
+    DeltaFormat.read(table).collect()
+    DeltaFormat.append(table, pl.LazyFrame({"id": [3], "value": ["c"]}), False, SAFE)
+
+    assert pl.read_delta(table)["id"].sort().to_list() == [1, 2, 3]
+    assert DeltaTable(table).version() == 1
+
+
+def test_append_if_unchanged_refused_after_a_concurrent_commit(table, no_reads):
+    DeltaFormat.read(table).collect()
+    write_deltalake(table, pl.DataFrame({"id": [3], "value": ["c"]}), mode="append")
+
+    with pytest.raises(DbtRuntimeError, match="changed since version 0"):
+        DeltaFormat.append(
+            table, pl.LazyFrame({"id": [3], "value": ["c"]}), False, SAFE
+        )
+
+    assert pl.read_delta(table)["id"].sort().to_list() == [1, 2, 3]
+    assert DeltaTable(table).version() == 1
+
+
+def test_append_if_unchanged_without_a_read_appends(table, no_reads):
+    write_deltalake(table, pl.DataFrame({"id": [3], "value": ["c"]}), mode="append")
+    DeltaFormat.append(table, pl.LazyFrame({"id": [4], "value": ["d"]}), False, SAFE)
+
+    assert pl.read_delta(table)["id"].sort().to_list() == [1, 2, 3, 4]
+
+
+def test_a_plain_append_still_rebases_on_a_concurrent_commit(table, no_reads):
+    DeltaFormat.read(table).collect()
+    write_deltalake(table, pl.DataFrame({"id": [3], "value": ["c"]}), mode="append")
+    DeltaFormat.append(table, pl.LazyFrame({"id": [4], "value": ["d"]}), False, {})
+
+    assert pl.read_delta(table)["id"].sort().to_list() == [1, 2, 3, 4]
